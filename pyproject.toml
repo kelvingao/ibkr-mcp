@@ -1,0 +1,23 @@
+[project]
+name = "ibkr-mcp"
+version = "0.1.4"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ib-async>=2.0.1",
+    "mcp[cli]>=1.21.2",
+]
+
+[project.scripts]
+ibkr-mcp = "ibkr_mcp:main"
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["ibkr_mcp"]
+
+[tool.setuptools.package-dir]
+"" = "src"
