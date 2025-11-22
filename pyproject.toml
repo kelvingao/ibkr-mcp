@@ -1,12 +1,14 @@
 [project]
 name = "ibkr-mcp"
-version = "0.1.4"
+version = "0.1.8"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "ib-async>=2.0.1",
+    "loguru>=0.7.3",
     "mcp[cli]>=1.21.2",
+    "pandas>=2.3.3",
 ]
 
 [project.scripts]
@@ -17,7 +19,7 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["ibkr_mcp"]
+packages = ["ibkr_mcp", "ibkr_mcp.tools"]
 
 [tool.setuptools.package-dir]
 "" = "src"
