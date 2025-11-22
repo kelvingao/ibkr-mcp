@@ -250,13 +250,14 @@ wheels = [
 
 [[package]]
 name = "ibkr-mcp"
-version = "0.1.8"
+version = "0.1.10"
 source = { editable = "." }
 dependencies = [
     { name = "ib-async" },
     { name = "loguru" },
     { name = "mcp", extra = ["cli"] },
     { name = "pandas" },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
@@ -265,6 +266,7 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.21.2" },
     { name = "pandas", specifier = ">=2.3.3" },
+    { name = "python-dotenv", specifier = ">=1.2.1" },
 ]
 
 [[package]]

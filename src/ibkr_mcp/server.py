@@ -2,6 +2,8 @@
 FastMCP MCP server entry point, packaged under ibkr_mcp.
 """
 
+import os
+
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator
@@ -12,6 +14,10 @@ from mcp.server.fastmcp import FastMCP
 
 load_dotenv()
 
+IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
+IBKR_PORT = int(os.getenv("IBKR_PORT", "4001"))
+IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", "0"))
+IBKR_ACCOUNT = os.getenv("IBKR_ACCOUNT", "")
 
 @dataclass
 class IBKRContext:
@@ -34,7 +40,12 @@ async def ibkr_lifespan(server: FastMCP) -> AsyncIterator[IBKRContext]:
         IBKRContext: The context containing the IB client.
     """
     ib = IB()
-    await ib.connectAsync("127.0.0.1", 4001, clientId=9898, account="U9860850")
+    await ib.connectAsync(
+        IBKR_HOST,
+        IBKR_PORT,
+        clientId=IBKR_CLIENT_ID,
+        account=IBKR_ACCOUNT
+    )
 
     try:
         yield IBKRContext(ib=ib)
