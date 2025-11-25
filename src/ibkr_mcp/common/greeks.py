@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import pandas as pd
-from ib_async import IB, Option
+from ib_async import Contract, IB, Option
 from loguru import logger
 
 
@@ -37,6 +37,7 @@ class GreekCalculator:
         if missing_columns:
             for column in missing_columns:
                 enriched[column] = 0.0
+            self._ib.reqMarketDataType(2)
             self._populate_greeks_from_ib(enriched)
 
         for column in GREEK_COLUMNS:
@@ -107,7 +108,19 @@ class GreekCalculator:
                     error=exc,
                 )
 
-    def _build_option_contract(self, row: pd.Series) -> Option:
+    def _build_option_contract(self, row: pd.Series) -> Contract:
+        # Prefer using conId when available to avoid re-qualifying contracts and
+        # to satisfy ib_async's requirement that hashable contracts have a conId.
+        conid = row.get("conid")
+        if pd.notna(conid) and conid:
+            try:
+                conid_int = int(conid)
+                if conid_int > 0:
+                    return Contract(conId=conid_int, exchange="SMART")
+            except (TypeError, ValueError):
+                # Fall back to constructing by fields if conid is malformed
+                pass
+
         expiry = str(row.get("expiry", ""))
         symbol = str(row.get("underlying") or row.get("symbol") or "")
         if not symbol:
@@ -126,7 +139,7 @@ class GreekCalculator:
         if pd.isna(multiplier_value) or multiplier_value <= 0.0:
             multiplier_value = 100.0
         multiplier = str(int(multiplier_value))
-        contract = Option(
+        contract: Contract = Option(
             symbol=symbol,
             lastTradeDateOrContractMonth=expiry,
             strike=strike,
@@ -135,6 +148,20 @@ class GreekCalculator:
             multiplier=multiplier,
             currency="USD",
         )
+
+        # If possible, qualify the contract to populate conId so that ib_async
+        # can safely hash it when used in reqMktData and similar calls.
+        if self._ib is None:
+            logger.debug("No IBKR connection available for contract qualification")
+            return contract
+
+        try:
+            self._ib.qualifyContracts(contract)
+        except Exception:
+            # Qualification is a best-effort improvement; failures are
+            # handled by the caller when reqMktData raises.
+            pass
+
         return contract
 
 

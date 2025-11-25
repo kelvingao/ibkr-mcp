@@ -1,8 +1,7 @@
-"""
-Common utilities for IBKR MCP tools (positions, greeks, etc.).
+"""Common utilities for IBKR MCP (positions, greeks, etc.).
 
-This module exists to ensure the ``ibkr_mcp.tools.common`` package is
-included correctly in built distributions.
+This package hosts reusable domain logic that can be used by the
+MCP server, tools, and external clients.
 """
 
 from .greeks import GreekCalculator, compute_concentration  # noqa: F401
@@ -15,4 +14,3 @@ __all__ = [
     "PositionSource",
     "NORMALISED_COLUMNS",
 ]
-

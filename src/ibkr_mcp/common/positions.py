@@ -18,6 +18,7 @@ NORMALISED_COLUMNS = [
     "right",
     "strike",
     "sec_type",
+    "conid",
     "multiplier",
     "quantity",
     "avg_price",
@@ -93,6 +94,7 @@ class PositionLoader:
                     market_value = float(getattr(ib_portfolio, "marketValue", 0.0) or 0.0)
             row = {
                 "account": getattr(position, "account", ""),
+                "conid": key,
                 "underlying": symbol,
                 "symbol": getattr(contract, "localSymbol", symbol) or symbol,
                 "expiry": expiry,
@@ -157,6 +159,7 @@ class PositionLoader:
         df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0.0)
         df["multiplier"] = pd.to_numeric(df["multiplier"], errors="coerce").replace(0, 1.0)
         numeric_cols = [
+            "conid",
             "avg_price",
             "market_price",
             "market_value",
