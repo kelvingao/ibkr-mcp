@@ -28,8 +28,21 @@ class GreekCalculator:
 
     def compute(self, positions: pd.DataFrame) -> GreekSummary:
         if positions.empty:
-            per_symbol = pd.DataFrame(columns=["underlying", *GREEK_COLUMNS])
-            totals = {column: 0.0 for column in GREEK_COLUMNS}
+            per_symbol = pd.DataFrame(
+                columns=[
+                    "underlying",
+                    *GREEK_COLUMNS,
+                    "delta_exposure_net",
+                    "delta_exposure_long",
+                    "delta_exposure_short",
+                ]
+            )
+            totals = {
+                **{column: 0.0 for column in GREEK_COLUMNS},
+                "delta_exposure_net": 0.0,
+                "delta_exposure_long": 0.0,
+                "delta_exposure_short": 0.0,
+            }
             return GreekSummary(per_symbol=per_symbol, totals=totals)
 
         enriched = positions.copy()
@@ -39,6 +52,19 @@ class GreekCalculator:
                 enriched[column] = 0.0
             self._ib.reqMarketDataType(2)
             self._populate_greeks_from_ib(enriched)
+
+        sec_type_series = enriched.get("sec_type")
+        stock_mask = pd.Series(False, index=enriched.index)
+        if sec_type_series is not None:
+            sec_type_normalised = sec_type_series.astype(str).str.upper().fillna("")
+            stock_mask = sec_type_normalised.eq("STK")
+            if stock_mask.any() and "delta" in enriched.columns:
+                stock_deltas = pd.to_numeric(
+                    enriched.loc[stock_mask, "delta"], errors="coerce"
+                )
+                needs_default = stock_deltas.isna() | (stock_deltas == 0.0)
+                if needs_default.any():
+                    enriched.loc[stock_deltas.index[needs_default], "delta"] = 1.0
 
         for column in GREEK_COLUMNS:
             enriched[column] = pd.to_numeric(enriched[column], errors="coerce").fillna(0.0)
@@ -51,12 +77,40 @@ class GreekCalculator:
             )
             enriched[column] *= multiplier
 
+        price = pd.to_numeric(
+            enriched.get("underlying_price", pd.Series(pd.NA, index=enriched.index)),
+            errors="coerce",
+        )
+        fallback_needed = price.isna() | (price <= 0.0)
+        if fallback_needed.any():
+            market_price = pd.to_numeric(
+                enriched.get("market_price", pd.Series(0.0, index=enriched.index)),
+                errors="coerce",
+            ).fillna(0.0)
+            stock_fallback = fallback_needed & stock_mask
+            if stock_fallback.any():
+                price = price.where(~stock_fallback, market_price)
+        price = price.fillna(0.0).clip(lower=0.0)
+        delta_exposure_net = enriched["delta"] * price
+        enriched["delta_exposure_net"] = delta_exposure_net
+        enriched["delta_exposure_long"] = delta_exposure_net.clip(lower=0.0)
+        enriched["delta_exposure_short"] = delta_exposure_net.clip(upper=0.0)
+
+        aggregate_columns = [
+            *GREEK_COLUMNS,
+            "delta_exposure_net",
+            "delta_exposure_long",
+            "delta_exposure_short",
+        ]
         per_symbol = (
-            enriched.groupby("underlying", as_index=False)[GREEK_COLUMNS]
+            enriched.groupby("underlying", as_index=False)[aggregate_columns]
             .sum()
             .sort_values("underlying")
         )
         totals = {column: float(enriched[column].sum()) for column in GREEK_COLUMNS}
+        totals["delta_exposure_net"] = float(enriched["delta_exposure_net"].sum())
+        totals["delta_exposure_long"] = float(enriched["delta_exposure_long"].sum())
+        totals["delta_exposure_short"] = float(enriched["delta_exposure_short"].sum())
         logger.info("Computed portfolio Greeks totals: {totals}", totals=totals)
         return GreekSummary(per_symbol=per_symbol, totals=totals)
 
@@ -68,6 +122,8 @@ class GreekCalculator:
             logger.debug("IBKR client is not connected; skipping greek enrichment")
             return
         logger.info("Fetching missing greeks from IBKR")
+        if "underlying_price" not in df.columns:
+            df["underlying_price"] = pd.NA
         for idx, row in df.iterrows():
             if row.get("sec_type", "OPT").upper() != "OPT":
                 continue
@@ -91,6 +147,16 @@ class GreekCalculator:
                 greeks = getattr(ticker, "modelGreeks", None)
                 if greeks is None:
                     continue
+                underlying_price = getattr(greeks, "undPrice", None)
+                if underlying_price is not None:
+                    current_price = df.at[idx, "underlying_price"]
+                    if pd.isna(current_price) or (
+                        isinstance(current_price, str) and not current_price.strip()
+                    ):
+                        try:
+                            df.at[idx, "underlying_price"] = float(underlying_price)
+                        except (TypeError, ValueError):
+                            pass
                 for column in GREEK_COLUMNS:
                     current = df.at[idx, column]
                     if current:
@@ -165,27 +231,43 @@ class GreekCalculator:
         return contract
 
 
-def compute_concentration(positions: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+def compute_concentration(positions: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series, Dict[str, float]]:
+    exposure_columns = ["underlying", "gross_exposure", "gross_pct"]
     if positions.empty:
         return (
-            pd.DataFrame(columns=["underlying", "gross_exposure", "gross_pct"]),
+            pd.DataFrame(columns=exposure_columns),
             pd.Series(dtype=float),
+            {
+                "gross_total": 0.0,
+            },
         )
+
     exposures = positions.copy()
     value_col = "market_value" if "market_value" in exposures.columns else "cost_basis"
     exposures[value_col] = pd.to_numeric(exposures.get(value_col, 0.0), errors="coerce").fillna(0.0)
     exposures["abs_value"] = exposures[value_col].abs()
     per_symbol = (
-        exposures.groupby("underlying", as_index=False)["abs_value"].sum().rename(columns={"abs_value": "gross_exposure"})
+        exposures.groupby("underlying", as_index=False)["abs_value"]
+        .sum()
+        .rename(columns={"abs_value": "gross_exposure"})
+        .sort_values("gross_exposure", ascending=False)
     )
+
     gross_total = float(per_symbol["gross_exposure"].sum())
-    if gross_total == 0.0:
-        per_symbol["gross_pct"] = 0.0
-    else:
-        per_symbol["gross_pct"] = per_symbol["gross_exposure"] / gross_total
-    per_symbol.sort_values("gross_exposure", ascending=False, inplace=True)
+    per_symbol["gross_pct"] = 0.0 if gross_total == 0.0 else per_symbol["gross_exposure"] / gross_total
+    per_symbol = per_symbol[["underlying", "gross_exposure", "gross_pct"]]
+
     concentration_series = per_symbol.set_index("underlying")["gross_pct"]
-    return per_symbol, concentration_series
+    totals = {
+        "gross_total": gross_total,
+    }
+    return per_symbol, concentration_series, totals
+
+def compute_delta_exposure(positions: pd.DataFrame) -> pd.DataFrame:
+    if positions.empty:
+        return pd.DataFrame(columns=["underlying", "delta_exposure"])
+    
+    
 
 
 __all__ = ["GreekCalculator", "GreekSummary", "compute_concentration", "GREEK_COLUMNS"]

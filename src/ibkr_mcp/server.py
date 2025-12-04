@@ -3,10 +3,10 @@ FastMCP MCP server entry point, packaged under ibkr_mcp.
 """
 
 import os
-from datetime import datetime, timedelta
 
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
 
 from dotenv import load_dotenv
@@ -14,8 +14,7 @@ from ib_async import IB, Contract, Stock, Forex, Future, Option
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware.cors import CORSMiddleware
 
-from ibkr_mcp.common.positions import PositionLoader, PositionSource
-from ibkr_mcp.common.greeks import GreekCalculator, compute_concentration
+from ibkr_mcp.services import AccountService, NewsService, OptionDataService, RiskService
 
 load_dotenv()
 
@@ -23,6 +22,9 @@ IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
 IBKR_PORT = int(os.getenv("IBKR_PORT", "4001"))
 IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", "0"))
 IBKR_ACCOUNT = os.getenv("IBKR_ACCOUNT", "")
+OPTION_DATA_DIR = Path(os.getenv("IBKR_MCP_OPTION_DATA_DIR", "optiondata"))
+OPTION_HISTORY_DIR = Path(os.getenv("IBKR_MCP_OPTION_HISTORY_DIR", "historydata"))
+DEFAULT_MARKET_DATA_TYPE = os.getenv("IBKR_MCP_MARKET_DATA_TYPE", "LIVE")
 
 @dataclass
 class IBKRContext:
@@ -31,6 +33,22 @@ class IBKRContext:
     """
 
     ib: IB
+    account_service: AccountService = field(init=False)
+    risk_service: RiskService = field(init=False)
+    news_service: NewsService = field(init=False)
+    option_data_service: OptionDataService = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.account_service = AccountService(self.ib, self._ensure_connected)
+        self.risk_service = RiskService(self.ib, self._ensure_connected)
+        self.news_service = NewsService(self.ib, self._ensure_connected)
+        self.option_data_service = OptionDataService(
+            self.ib,
+            self._ensure_connected,
+            data_dir=OPTION_DATA_DIR,
+            history_dir=OPTION_HISTORY_DIR,
+            default_market_data_type=DEFAULT_MARKET_DATA_TYPE,
+        )
 
     def _ensure_connected(self) -> None:
         if not self.ib.isConnected():
@@ -79,22 +97,8 @@ class IBKRContext:
         else:
             return "\n".join(f"- {item}" for item in items)
 
-
-
-
-
     async def get_account_summary(self, account: str = "") -> list[dict]:
-        self._ensure_connected()
-        raw = await self.ib.accountSummaryAsync(account)
-        return [
-            {
-                "tag": v.tag,
-                "currency": v.currency,
-                "account": v.account,
-                "value": v.value,
-            }
-            for v in raw or []
-        ]
+        return await self.account_service.get_account_summary(account)
 
     async def get_positions(self, account: str = "") -> dict:
         """
@@ -102,12 +106,7 @@ class IBKRContext:
 
         Returns a dictionary containing a list of normalised position records.
         """
-        self._ensure_connected()
-        loader = PositionLoader(PositionSource(ib=self.ib))
-        positions = loader.load(account)
-        return {
-            "positions": positions.to_dict(orient="records")
-        }
+        return self.account_service.get_positions(account)
 
     async def get_portfolio(self, account: str = "") -> list[dict]:
         """
@@ -115,26 +114,7 @@ class IBKRContext:
 
         Returns a list of portfolio position dictionaries.
         """
-        self._ensure_connected()
-        portfolio = self.ib.portfolio(account)
-        if portfolio is None:
-            return []
-
-        items: list[dict] = []
-        for p in portfolio:
-            items.append(
-                {
-                    "account": getattr(p, "account", ""),
-                    "contract": getattr(p, "contract", None),
-                    "position": getattr(p, "position", 0),
-                    "marketPrice": getattr(p, "marketPrice", 0.0),
-                    "marketValue": getattr(p, "marketValue", 0.0),
-                    "averageCost": getattr(p, "averageCost", 0.0),
-                    "unrealizedPNL": getattr(p, "unrealizedPNL", 0.0),
-                    "realizedPNL": getattr(p, "realizedPNL", 0.0),
-                }
-            )
-        return items
+        return self.account_service.get_portfolio(account)
 
     async def get_greeks_summary(self, account: str = "") -> Dict[str, Any]:
         """
@@ -146,25 +126,47 @@ class IBKRContext:
         - aggregates portfolio-wide greeks totals
         - computes a simple concentration metric by gross exposure
         """
-        self._ensure_connected()
-        loader = PositionLoader(PositionSource(ib=self.ib))
-        positions = loader.load(account)
+        return await self.risk_service.get_greeks_summary(account)
 
-        calculator = GreekCalculator(self.ib)
-        greek_summary = calculator.compute(positions)
-        concentration, concentration_series = compute_concentration(positions)
+    async def evaluate_portfolio_risk(
+        self,
+        account: str = "",
+        config: Optional[Dict[str, Any]] = None,
+        config_path: str = "risk.yaml",
+    ) -> Dict[str, Any]:
+        """
+        Load positions, compute greeks and concentration, and evaluate risk limits.
 
-        return {
-            "greek_summary": {
-                "per_symbol": greek_summary.per_symbol.to_dict(orient="records"),
-                "totals": greek_summary.totals,
-            },
-            "concentration": {
-                "per_symbol": concentration.to_dict(orient="records"),
-                "series": concentration_series.to_dict(),
-            },
-            "position_count": len(positions),
-        }
+        The risk configuration can be provided directly as a dict (via MCP tool
+        arguments) or loaded from a YAML file. Lookup order is:
+        - the explicitly provided ``config`` argument, if not None
+        - the explicitly provided ``config_path`` argument, if not empty
+        - the IBKR_MCP_RISK_CONFIG environment variable
+        - a local "risk.yaml" file in the working directory
+        """
+        return await self.risk_service.evaluate_portfolio_risk(
+            account=account,
+            config=config,
+            config_path=config_path,
+        )
+
+    async def generate_playbook_actions(
+        self,
+        account: str = "",
+        config: Optional[Dict[str, Any]] = None,
+        config_path: str = "risk.yaml",
+    ) -> Dict[str, Any]:
+        """
+        Generate strategy playbook actions based on current positions and risk rules.
+
+        This reuses the same risk configuration resolution as evaluate_portfolio_risk
+        and applies PlaybookEngine to derive human-readable adjustment suggestions.
+        """
+        return await self.risk_service.generate_playbook_actions(
+            account=account,
+            config=config,
+            config_path=config_path,
+        )
 
     async def get_historical_news(
         self,
@@ -180,118 +182,32 @@ class IBKRContext:
         Get historical news for a stock by symbol or conid between two dates.
         Mirrors the behaviour of the original news tool, but centralised here.
         """
-        self._ensure_connected()
-        ib = self.ib
+        return await self.news_service.get_historical_news(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            max_count=max_count,
+            exchange=exchange,
+            currency=currency,
+            conid=conid,
+        )
 
-        # Validate and set default dates
-        if not end_date:
-            end_date = datetime.now().strftime("%Y-%m-%d")
-        if not start_date:
-            start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-
-        # Validate date format and order
-        try:
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-            if start_dt > end_dt:
-                return {
-                    "ok": False,
-                    "error_type": "INVALID_DATE_RANGE",
-                    "message": f"Start date {start_date} must be before end date {end_date}",
-                    "symbol": symbol,
-                }
-        except ValueError as exc:
-            return {
-                "ok": False,
-                "error_type": "INVALID_DATE_FORMAT",
-                "message": f"Date format must be YYYY-MM-DD: {exc}",
-                "symbol": symbol,
-            }
-
-        # Validate max_count
-        max_count = max(1, min(100, max_count))
-
-        try:
-            # Use conid if provided, otherwise qualify symbol
-            if conid:
-                contract = Contract(conId=conid)
-                contracts = [contract]
-            else:
-                contract = Contract(
-                    symbol=symbol,
-                    secType="STK",
-                    exchange=exchange,
-                    currency=currency,
-                )
-                contracts_raw = await ib.qualifyContractsAsync(contract)
-                contracts = []
-                for contract_list in contracts_raw:
-                    if isinstance(contract_list, list):
-                        contracts.extend(contract_list)
-                    else:
-                        contracts.append(contract_list)
-
-            if not contracts:
-                return {
-                    "ok": False,
-                    "error_type": "NO_CONTRACT",
-                    "message": f"No contract found for {symbol}",
-                    "symbol": symbol,
-                }
-
-            c = contracts[0]
-            actual_conid = getattr(c, "conId", 0)
-
-            # Common news providers; adjust as needed
-            news_provider_codes = "BRFG+BRFUPDN+DJ-N+DJ-RT+DJ-RTA+DJ-RTE+DJ-RTG+DJNL+FLY"
-
-            news = await ib.reqHistoricalNewsAsync(
-                actual_conid,
-                news_provider_codes,
-                start_date,
-                end_date,
-                max_count,
-            )
-
-            if not news:
-                return {
-                    "ok": True,
-                    "symbol": symbol,
-                    "conid": actual_conid,
-                    "period": {"start": start_date, "end": end_date},
-                    "articles": [],
-                    "total_count": 0,
-                }
-
-            # Process news articles
-            articles: list[Dict[str, Any]] = []
-            if isinstance(news, list):
-                for article in news[:max_count]:
-                    articles.append(
-                        {
-                            "headline": getattr(article, "headline", ""),
-                            "timestamp": getattr(article, "time", ""),
-                            "provider": getattr(article, "providerCode", ""),
-                            "article_id": getattr(article, "articleId", ""),
-                        }
-                    )
-
-            return {
-                "ok": True,
-                "symbol": symbol,
-                "conid": actual_conid,
-                "period": {"start": start_date, "end": end_date},
-                "articles": articles,
-                "total_count": len(articles),
-            }
-
-        except Exception as exc:
-            return {
-                "ok": False,
-                "error_type": "IB_ERROR",
-                "message": f"Error getting historical news: {exc}",
-                "symbol": symbol,
-            }
+    async def get_option_chains(
+        self,
+        symbols: Optional[list[str]] = None,
+        mode: str = "live",
+        market_data_type: Optional[str] = None,
+        persist: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Fetch option chain snapshots either via live IBKR data or local cache.
+        """
+        return await self.option_data_service.fetch_option_chains(
+            symbols or [],
+            mode=mode,
+            market_data_type=market_data_type,
+            persist=persist,
+        )
 
 @asynccontextmanager
 async def ibkr_lifespan(server: FastMCP) -> AsyncIterator[IBKRContext]:
