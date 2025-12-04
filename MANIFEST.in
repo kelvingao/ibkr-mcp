@@ -1,0 +1,21 @@
+# Include package data
+include README.md
+include LICENSE
+include pyproject.toml
+
+# Include only __init__.py files (for public API visibility)
+recursive-include src/ibkr_mcp __init__.py
+recursive-include src/ibkr_mcp __main__.py
+include src/ibkr_mcp/server.py
+
+# Exclude all other Python source files from wheel
+# (they will be replaced by compiled .so/.pyd files)
+global-exclude *.py[cod]
+global-exclude __pycache__
+global-exclude *.so
+global-exclude *.c
+global-exclude .git*
+global-exclude .DS_Store
+
+# Exclude test files
+recursive-exclude tests *

@@ -6,6 +6,12 @@ dist/
 wheels/
 *.egg-info
 
+# Cython build artifacts
+*.so
+*.pyd
+*.c
+*.html
+
 # Virtual environments
 .venv
 .env

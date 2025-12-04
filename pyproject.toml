@@ -1,27 +1,34 @@
 [project]
 name = "ibkr-mcp"
-version = "0.1.13"
-description = "Add your description here"
+version = "0.1.14"
+description = "Interactive Brokers MCP Server for AI-powered trading"
 readme = "README.md"
 requires-python = ">=3.12"
+license = { text = "Proprietary" }
 dependencies = [
     "ib-async>=2.0.1",
     "loguru>=0.7.3",
     "mcp[cli]>=1.21.2",
     "pandas>=2.3.3",
     "plotly>=6.5.0",
+    "pyarrow>=22.0.0",
     "python-dotenv>=1.2.1",
+    "pyyaml>=6.0.3",
 ]
 
 [project.scripts]
 ibkr-mcp = "ibkr_mcp:main"
 
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=61", "wheel", "cython>=3.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["ibkr_mcp", "ibkr_mcp.common"]
+packages = ["ibkr_mcp", "ibkr_mcp.common", "ibkr_mcp.services", "ibkr_mcp.strategies"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+# Cython compilation config
+[tool.cython]
+language_level = "3"
